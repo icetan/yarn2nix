@@ -61,7 +61,7 @@ in rec {
     "--ignore-scripts"
   ];
 
-  mkYarnModules = {
+  mkYarnModules' = {
     name ? "${pname}-${version}", # safe name and version, e.g. testcompany-one-modules-1.0.0
     pname, # original name, e.g @testcompany/one
     version,
@@ -143,14 +143,130 @@ in rec {
 
         yarn install ${lib.escapeShellArgs yarnFlags}
 
-        ${lib.concatStringsSep "\n" postInstall}
-
         mkdir $out
         mv node_modules $out/
         mv deps $out/
         patchShebangs $out
 
         runHook postBuild
+      '';
+    };
+
+  fixYarnModule = {
+    modules,
+    pname,
+    postInstall ? null,
+    buildInputs ? [],
+    nativeBuildInputs ? [],
+    sourceFilter ? _path: _type: true,
+    dependencyFilter ? _path: _name: _type: true
+  }:
+    let
+      inherit (pkgs.lib) elem elemAt splitString reverseList foldl head tail;
+      root = modules + "/node_modules";
+      rootLen = (builtins.stringLength (toString root)) + 1;
+      package = name:
+        let p = "${root}/${name}/package.json"; in
+        if builtins.pathExists p
+        then builtins.fromJSON (builtins.unsafeDiscardStringContext (builtins.readFile p))
+        else {};
+
+      packageDeps = type: name:
+        builtins.attrNames ((package name).${type} or {});
+      filteredDeps = type: path: name:
+        builtins.filter
+          (n: dependencyFilter "${path}/${name}/${n}" n type)
+          (packageDeps type name);
+      allDeps = name: (packageDeps "dependencies" name) ++ (packageDeps "devDependencies" name);
+      allFilteredDeps = path: name: (filteredDeps "dependencies" path name) ++ (filteredDeps "devDependencies" path name);
+      getDeps = path: builtins.foldl' (acc: dname:
+        if builtins.elem dname acc
+        then acc
+        else getDeps "${path}/${dname}" (acc ++ [dname]) (allFilteredDeps path dname)
+      );
+
+      dirsToInclude = [pname] ++ getDeps "/${pname}" [] (allFilteredDeps "" pname);
+      #dirsToInclude' = builtins.trace (builtins.toJSON dirsToInclude) dirsToInclude;
+
+      splitRegexPath = p:
+        let ds = reverseList (splitString "/" p); in
+        foldl (acc: d: "${d}(/${acc})?") (head ds) (tail ds);
+      dirsToIncludeRegex = "(${lib.concatMapStringsSep "|" splitRegexPath dirsToInclude})/.*";
+      match = path:
+        ! builtins.isNull (builtins.match dirsToIncludeRegex path);
+
+      pathFilter = path: type:
+        let subpath = builtins.substring rootLen 10000000 path; in
+        (
+          # Files not in root directory (i.e. node_modules)
+          (type == "regular"
+            && ! isNull (builtins.match ".*/.*" subpath))
+          # Directories under node_modules matching dependencies
+          || match "${subpath}/")
+        && (sourceFilter subpath type);
+
+    in stdenv.mkDerivation {
+      inherit pname buildInputs postInstall;
+      name = pname + "-postinstall";
+      src = builtins.path rec {
+        name = "node_modules";
+        path = root;
+        filter = pathFilter;
+      };
+      dontInstall = true;
+      nativeBuildInputs = [ nodejs git ] ++ nativeBuildInputs;
+
+      buildPhase = ''
+        cd $pname
+        runHook postInstall
+
+        mkdir -p $out/node_modules/$pname
+        mv * $out/node_modules/$pname/
+      '';
+    };
+
+  mkYarnModules = {
+    name ? "${pname}-${version}", # safe name and version, e.g. testcompany-one-modules-1.0.0
+    pname, # original name, e.g @testcompany/one
+    version,
+    packageJSON,
+    yarnLock,
+    yarnNix ? mkYarnNix { inherit yarnLock; },
+    offlineCache ? importOfflineCache yarnNix,
+    yarnFlags ? defaultYarnFlags,
+    pkgConfig ? {},
+    preBuild ? "",
+    postBuild ? "",
+    workspaceDependencies ? [], # List of yarn packages
+    packageResolutions ? {},
+  }@args:
+    let
+      modules = mkYarnModules' args;
+
+      postInstallModules = (builtins.concatMap (key:
+        let
+          packageJSON = "${modules}/node_modules/${key}/package.json";
+        in
+        lib.optional (pkgConfig.${key} ? postInstall && builtins.pathExists packageJSON)
+          (fixYarnModule {
+            inherit modules;
+            pname = key;
+            postInstall = pkgConfig.${key}.postInstall;
+            buildInputs = pkgConfig.${key}.buildInputs or [];
+            nativeBuildInputs = pkgConfig.${key}.nativeBuildInputs or [];
+            sourceFilter = pkgConfig.${key}.sourceFilter or (_: _: true);
+            dependencyFilter = pkgConfig.${key}.dependencyFilter or (_: _: _: true);
+          })
+      ) (builtins.attrNames pkgConfig));
+    in stdenv.mkDerivation {
+      name = modules.name + "-postinstall";
+      dontFixup = true;
+      buildCommand = ''
+        mkdir -p $out
+
+        cp -r ${modules}/* $out/
+        chmod -R +w $out
+        ${lib.concatMapStringsSep "\n" (m: "cp -rf ${m}/node_modules/* $out/node_modules/") postInstallModules}
       '';
     };
 
