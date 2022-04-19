@@ -77,26 +77,6 @@ in rec {
     packageResolutions ? {},
   }:
     let
-      extraNativeBuildInputs =
-        lib.concatMap
-          (key: pkgConfig.${key}.nativeBuildInputs or [])
-          (builtins.attrNames pkgConfig);
-      extraBuildInputs =
-        lib.concatMap
-          (key: pkgConfig.${key}.buildInputs or [])
-          (builtins.attrNames pkgConfig);
-
-      postInstall = (builtins.map (key:
-        if (pkgConfig.${key} ? postInstall) then
-          ''
-            for f in $(find -L -path '*/node_modules/${key}' -type d); do
-              (cd "$f" && (${pkgConfig.${key}.postInstall}))
-            done
-          ''
-        else
-          ""
-      ) (builtins.attrNames pkgConfig));
-
       workspaceJSON = pkgs.writeText
         "${name}-workspace-package.json"
         (builtins.toJSON { private = true; workspaces = ["deps/**"]; resolutions = packageResolutions; }); # scoped packages need second splat
@@ -104,7 +84,7 @@ in rec {
       workspaceDependencyLinks = lib.concatMapStringsSep "\n"
         (dep: ''
           mkdir -p "deps/${dep.pname}"
-          ln -sf ${dep.packageJSON} "deps/${dep.pname}/package.json"
+          tar -xf "${dep}/tarballs/${dep.name}.tgz" --directory "deps/${dep.pname}" --strip-components=1
         '')
         workspaceDependencies;
 
@@ -112,8 +92,11 @@ in rec {
       inherit preBuild postBuild name;
       dontUnpack = true;
       dontInstall = true;
-      nativeBuildInputs = [ yarn nodejs git ] ++ extraNativeBuildInputs;
-      buildInputs = extraBuildInputs;
+      dontFixup = true;
+      dontStrip = true;
+      dontPatchELF = true;
+      nativeBuildInputs = [ yarn nodejs git ]; # ++ extraNativeBuildInputs;
+      #buildInputs = extraBuildInputs;
 
       configurePhase = lib.optionalString (offlineCache ? outputHash) ''
         if ! cmp -s ${yarnLock} ${offlineCache}/yarn.lock; then
@@ -130,6 +113,7 @@ in rec {
 
         mkdir -p "deps/${pname}"
         cp ${packageJSON} "deps/${pname}/package.json"
+        ln -sT ../../../node_modules "deps/${pname}/node_modules"
         cp ${workspaceJSON} ./package.json
         cp ${yarnLock} ./yarn.lock
         chmod +w ./yarn.lock
@@ -260,7 +244,9 @@ in rec {
       ) (builtins.attrNames pkgConfig));
     in stdenv.mkDerivation {
       name = modules.name + "-postinstall";
-      dontFixup = true;
+      #dontFixup = true;
+      dontStrip = true;
+      dontPatchELF = true;
       buildCommand = ''
         mkdir -p $out
 
@@ -421,6 +407,10 @@ in rec {
     in stdenv.mkDerivation (builtins.removeAttrs attrs ["yarnNix" "pkgConfig" "workspaceDependencies" "packageResolutions"] // {
       inherit src pname;
 
+      #dontFixup = true;
+      dontStrip = true;
+      dontPatchELF = true;
+
       name = baseName;
 
       buildInputs = [ yarn nodejs rsync ] ++ extraBuildInputs;
@@ -444,15 +434,18 @@ in rec {
         mv $NIX_BUILD_TOP/temp "$PWD/deps/${pname}"
         cd $PWD
 
-        ln -s ${deps}/deps/${pname}/node_modules "deps/${pname}/node_modules"
-
-        cp -r $node_modules node_modules
-        chmod -R +w node_modules
+        #cp -r $node_modules node_modules
+        #chmod -R +w node_modules
+        mkdir -p node_modules
+        ${pkgs.xorg.lndir}/bin/lndir -silent $node_modules node_modules
 
         ${linkDirFunction}
 
         linkDirToDirLinks "$(dirname node_modules/${pname})"
-        ln -s "deps/${pname}" "node_modules/${pname}"
+
+        rm node_modules/${pname}
+        ln -sr "deps/${pname}" "node_modules/${pname}"
+        ln -sr node_modules "deps/${pname}/node_modules"
 
         ${workspaceDependencyCopy}
 
