@@ -485,10 +485,11 @@ in rec {
 
       meta = {
         inherit (nodejs.meta) platforms;
-        description = packageJSON.description or "";
-        homepage = packageJSON.homepage or "";
-        version = packageJSON.version or "";
-        license = if packageJSON ? license then getLicenseFromSpdxId packageJSON.license else "";
+        description = package.description or "";
+        homepage = package.homepage or "";
+        version = package.version or "";
+        license = if package ? license then getLicenseFromSpdxId package.license else "";
+        mainProgram = builtins.head ((builtins.attrNames package.bin or {}) ++ [pname]);
       } // (attrs.meta or {});
     });
 
