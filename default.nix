@@ -90,13 +90,9 @@ in rec {
 
     in stdenv.mkDerivation {
       inherit preBuild postBuild name;
-      dontUnpack = true;
-      dontInstall = true;
-      dontFixup = true;
-      dontStrip = true;
-      dontPatchELF = true;
-      nativeBuildInputs = [ yarn nodejs git ]; # ++ extraNativeBuildInputs;
-      #buildInputs = extraBuildInputs;
+
+      phases = [ "configurePhase" "buildPhase" ];
+      nativeBuildInputs = [ yarn nodejs git ];
 
       configurePhase = lib.optionalString (offlineCache ? outputHash) ''
         if ! cmp -s ${yarnLock} ${offlineCache}/yarn.lock; then
@@ -197,10 +193,10 @@ in rec {
         path = root;
         filter = pathFilter;
       };
-      dontInstall = true;
       nativeBuildInputs = [ nodejs git ] ++ nativeBuildInputs;
+      phases = [ "unpackPhase" "installPhase" "fixupPhase" ];
 
-      buildPhase = ''
+      installPhase = ''
         cd $pname
         runHook postInstall
 
@@ -244,9 +240,6 @@ in rec {
       ) (builtins.attrNames pkgConfig));
     in stdenv.mkDerivation {
       name = modules.name + "-postinstall";
-      #dontFixup = true;
-      dontStrip = true;
-      dontPatchELF = true;
       buildCommand = ''
         mkdir -p $out
 
@@ -399,17 +392,13 @@ in rec {
           mkdir -p "deps/${dep.pname}"
           tar -xf "${dep}/tarballs/${dep.name}.tgz" --directory "deps/${dep.pname}" --strip-components=1
           if [ ! -e "deps/${dep.pname}/node_modules" ]; then
-            ln -s "${deps}/deps/${dep.pname}/node_modules" "deps/${dep.pname}/node_modules"
+            ln -sr node_modules "deps/${dep.pname}/node_modules"
           fi
         '')
         workspaceDependenciesTransitive;
 
     in stdenv.mkDerivation (builtins.removeAttrs attrs ["yarnNix" "pkgConfig" "workspaceDependencies" "packageResolutions"] // {
       inherit src pname;
-
-      #dontFixup = true;
-      dontStrip = true;
-      dontPatchELF = true;
 
       name = baseName;
 
@@ -434,10 +423,8 @@ in rec {
         mv $NIX_BUILD_TOP/temp "$PWD/deps/${pname}"
         cd $PWD
 
-        #cp -r $node_modules node_modules
-        #chmod -R +w node_modules
-        mkdir -p node_modules
-        ${pkgs.xorg.lndir}/bin/lndir -silent $node_modules node_modules
+        cp -r $node_modules node_modules
+        chmod -R +w node_modules
 
         ${linkDirFunction}
 
@@ -466,6 +453,17 @@ in rec {
         node ${./internal/fixup_bin.js} $out/bin $out/libexec/${pname}/node_modules ${lib.concatStringsSep " " publishBinsFor_}
 
         runHook postInstall
+      '';
+
+      fixupPhase = ''
+        runHook preFixup
+
+        for x in $(find $out/bin -type f,l -exec realpath {} \;); do
+          chmod +x $x
+          patchShebangs $x
+        done
+
+        runHook postFixup
       '';
 
       doDist = true;
