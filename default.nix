@@ -41,10 +41,14 @@ in rec {
 
   inherit getLicenseFromSpdxId;
 
+  mkYarnLock = path: builtins.path { name = "yarn-lock"; inherit path; };
+
+  mkPackageJSON = path: builtins.path { name = "package-json"; inherit path; };
+
   # Generates the yarn.nix from the yarn.lock file
   mkYarnNix = { yarnLock, flags ? [] }:
     pkgs.runCommand "yarn.nix" {}
-    "${yarn2nix}/bin/yarn2nix --lockfile ${yarnLock} --no-patch --builtin-fetchgit ${lib.escapeShellArgs flags} > $out";
+    "${yarn2nix}/bin/yarn2nix --lockfile ${mkYarnLock yarnLock} --no-patch --builtin-fetchgit ${lib.escapeShellArgs flags} > $out";
 
   # Loads the generated offline cache. This will be used by yarn as
   # the package source.
@@ -77,6 +81,9 @@ in rec {
     packageResolutions ? {},
   }:
     let
+      yarnLock' = mkYarnLock yarnLock;
+      packageJSON' = mkPackageJSON packageJSON;
+
       workspaceJSON = pkgs.writeText
         "${name}-workspace-package.json"
         (builtins.toJSON { private = true; workspaces = ["deps/**"]; resolutions = packageResolutions; }); # scoped packages need second splat
@@ -95,7 +102,7 @@ in rec {
       nativeBuildInputs = [ yarn nodejs git ];
 
       configurePhase = lib.optionalString (offlineCache ? outputHash) ''
-        if ! cmp -s ${yarnLock} ${offlineCache}/yarn.lock; then
+        if ! cmp -s ${yarnLock'} ${offlineCache}/yarn.lock; then
           echo "yarn.lock changed, you need to update the fetchYarnDeps hash"
           exit 1
         fi
@@ -108,10 +115,10 @@ in rec {
         runHook preBuild
 
         mkdir -p "deps/${pname}"
-        cp ${packageJSON} "deps/${pname}/package.json"
+        cp ${packageJSON'} "deps/${pname}/package.json"
         ln -sT ../../../node_modules "deps/${pname}/node_modules"
         cp ${workspaceJSON} ./package.json
-        cp ${yarnLock} ./yarn.lock
+        cp ${yarnLock'} ./yarn.lock
         chmod +w ./yarn.lock
 
         yarn config --offline set yarn-offline-mirror ${offlineCache}
@@ -166,7 +173,6 @@ in rec {
       );
 
       dirsToInclude = [pname] ++ getDeps "/${pname}" [] (allFilteredDeps "" pname);
-      #dirsToInclude' = builtins.trace (builtins.toJSON dirsToInclude) dirsToInclude;
 
       splitRegexPath = p:
         let ds = reverseList (splitString "/" p); in
@@ -268,7 +274,7 @@ in rec {
     ...
   }@attrs:
   let
-    package = lib.importJSON packageJSON;
+    package = lib.importJSON (mkPackageJSON packageJSON);
 
     packageGlobs = if lib.isList package.workspaces then package.workspaces else package.workspaces.packages;
 
@@ -296,9 +302,11 @@ in rec {
 
     packagePaths = lib.concatMap (expandGlob src) packageGlobs;
 
+    packagePaths' = map (p: builtins.path { path = p; }) packagePaths;
+
     packages = lib.listToAttrs (map (src:
       let
-        packageJSON = src + "/package.json";
+        packageJSON = mkPackageJSON (src + "/package.json");
 
         package = lib.importJSON packageJSON;
 
@@ -321,11 +329,12 @@ in rec {
         inherit name;
         value = mkYarnPackage (
           builtins.removeAttrs attrs ["packageOverrides"]
-          // { inherit src packageJSON yarnLock packageResolutions workspaceDependencies; }
-          // lib.attrByPath [name] {} packageOverrides
+          // { inherit src packageJSON packageResolutions workspaceDependencies;
+            yarnLock = mkYarnLock yarnLock;
+          } // lib.attrByPath [name] {} packageOverrides
         );
       })
-      packagePaths
+      packagePaths'
     );
   in packages;
 
@@ -347,7 +356,9 @@ in rec {
     ...
   }@attrs:
     let
-      package = lib.importJSON packageJSON;
+      yarnLock' = mkYarnLock yarnLock;
+      packageJSON' = mkPackageJSON packageJSON;
+      package = lib.importJSON packageJSON';
       pname = package.name;
       safeName = reformatPackageName pname;
       version = attrs.version or package.version;
@@ -363,7 +374,9 @@ in rec {
         preBuild = yarnPreBuild;
         postBuild = yarnPostBuild;
         workspaceDependencies = workspaceDependenciesTransitive;
-        inherit packageJSON pname version yarnLock offlineCache yarnFlags pkgConfig packageResolutions;
+        yarnLock = yarnLock';
+        packageJSON = packageJSON';
+        inherit pname version offlineCache yarnFlags pkgConfig packageResolutions;
       };
 
       publishBinsFor_ = unlessNull publishBinsFor [pname];
@@ -477,7 +490,8 @@ in rec {
       '';
 
       passthru = {
-        inherit pname package packageJSON deps;
+        inherit pname package deps;
+        packageJSON = packageJSON';
         workspaceDependencies = workspaceDependenciesTransitive;
       } // (attrs.passthru or {});
 
