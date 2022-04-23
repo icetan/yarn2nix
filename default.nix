@@ -63,6 +63,8 @@ in rec {
     "--frozen-lockfile"
     "--ignore-engines"
     "--ignore-scripts"
+    "--non-interactive"
+    "--no-progress"
   ];
 
   mkYarnModules' = {
@@ -95,6 +97,19 @@ in rec {
         '')
         workspaceDependencies;
 
+      createPatchFunction = ''
+        createPatch() {
+          echo "(cd \$1"
+          echo "patch -sfp1 <<'EOF'"
+          git --no-pager diff --no-color --no-index --no-prefix --diff-filter=d "$1" "$2" || true
+          echo "EOF"
+          echo "xargs rm -fr <<'EOF'"
+          git --no-pager diff --no-color --no-index --no-prefix --irreversible-delete --diff-filter=D "$1" "$2" \
+            | awk '{if (/^deleted file/) {sub("'$1'/","",x);print x};x=$3}' || true
+          echo "EOF"
+          echo "find . -type d -empty -delete)"
+        }
+      '';
     in stdenv.mkDerivation {
       inherit preBuild postBuild name;
 
@@ -128,9 +143,15 @@ in rec {
 
         ${workspaceDependencyLinks}
 
+        yarn install ${lib.escapeShellArgs yarnFlags} --production=true
+        mv node_modules node_modules_prod
+
         yarn install ${lib.escapeShellArgs yarnFlags}
 
+        ${createPatchFunction}
+
         mkdir $out
+        createPatch node_modules node_modules_prod | gzip > $out/prod.patch.gz
         mv node_modules $out/
         mv deps $out/
         patchShebangs $out
@@ -458,6 +479,8 @@ in rec {
       # files are an interesting output.
       installPhase = attrs.installPhase or ''
         runHook preInstall
+
+        gunzip < $node_modules/../prod.patch.gz | sh /dev/stdin node_modules
 
         mkdir -p $out/{bin,libexec/${pname}}
         mv node_modules $out/libexec/${pname}/node_modules
