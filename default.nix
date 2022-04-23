@@ -5,7 +5,7 @@
 }:
 
 let
-  inherit (pkgs) stdenv lib fetchurl linkFarm callPackage git rsync makeWrapper runCommandLocal;
+  inherit (pkgs) stdenv lib fetchurl linkFarm callPackage git makeWrapper runCommandLocal;
 
   compose = f: g: x: f (g x);
   id = x: x;
@@ -436,7 +436,7 @@ in rec {
 
       name = baseName;
 
-      buildInputs = [ yarn nodejs rsync ] ++ extraBuildInputs;
+      buildInputs = [ yarn nodejs ] ++ extraBuildInputs;
 
       node_modules = deps + "/node_modules";
 
@@ -509,7 +509,7 @@ in rec {
         rm -f .yarnrc
         cd $out/libexec/${pname}/deps/${pname}
         mkdir -p $out/tarballs/
-        yarn pack --offline --ignore-scripts --filename $out/tarballs/${baseName}.tgz
+        tar --transform 's,^./,package/,' --exclude=node_modules -cf - . | gzip > $out/tarballs/${baseName}.tgz
       '';
 
       passthru = {
